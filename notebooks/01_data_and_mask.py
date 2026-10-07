@@ -1,189 +1,440 @@
-# ---
-# jupyter:
-#   jupytext:
-#     text_representation:
-#       extension: .py
-#       format_name: percent
-#   kernelspec:
-#     display_name: Python 3
-#     language: python
-#     name: python3
-# ---
+# ============================================================
+# NB1 — DATA, CHAT TEMPLATE & MASK
+# ============================================================
 
-# %% [markdown]
-# # NB1 — Dữ liệu, chat template & mask
-#
-# **Chạy được trên CPU. Không cần GPU.** Đây là notebook duy nhất như vậy — và cũng là
-# notebook quyết định kết quả của cả lab.
-#
-# > Deck §17.2: *che loss và chat template quyết định kết quả nhiều hơn mọi biến thể
-# > LoRA cộng lại.* Notebook này không dạy bạn tin điều đó — nó bắt bạn **nhìn thấy** nó.
-#
-# Cuối notebook bạn sẽ có 4 artefact bắt buộc nộp:
-# 1. `results/mask_proof.json` — bằng chứng mask đúng
-# 2. `results/template_check.json` — template có nuốt khối `<think>` không
-# 3. `results/token_stats.json` — p95 → `max_length`
-# 4. `data/split/{train,val}.jsonl` — split cố định seed=42
-
-# %%
 import json
 import os
 import pathlib
 import sys
 
-sys.path.insert(0, str(pathlib.Path.cwd().parent / "src"))
+# ------------------------------------------------------------
+# 0. Path setup
+# ------------------------------------------------------------
+
 sys.path.insert(0, str(pathlib.Path.cwd() / "src"))
+sys.path.insert(0, str(pathlib.Path.cwd().parent / "src"))
 
 from labkit import data, report
 from labkit.config import get_tier
 
-ROOT = pathlib.Path.cwd() if (pathlib.Path.cwd() / "data").exists() else pathlib.Path.cwd().parent
+
+ROOT = (
+    pathlib.Path.cwd()
+    if (pathlib.Path.cwd() / "data").exists()
+    else pathlib.Path.cwd().parent
+)
+
+# Default dùng T4
+os.environ.setdefault("COMPUTE_TIER", "T4")
+
 TIER = get_tier(os.environ.get("COMPUTE_TIER", "T4"))
-print(f"tier={TIER.name}  model={TIER.model_id}  max_length={TIER.max_length}")
 
-# %% [markdown]
-# ## 1. Nạp corpus
-#
-# Corpus đi kèm lab: ticket CSKH tiếng Việt → JSON triage 4 trường. Bạn **được khuyến
-# khích** thay bằng dữ liệu miền của mình (xem §"Đổi dataset" trong README) — nhưng hãy
-# chạy hết notebook này một lượt với corpus mặc định trước, để có mốc so sánh.
+print("=" * 70)
+print("NB1 — DATA, TEMPLATE & MASK")
+print("=" * 70)
+print(f"ROOT       : {ROOT}")
+print(f"Tier       : {TIER.name}")
+print(f"Model      : {TIER.model_id}")
+print(f"max_length : {TIER.max_length}")
 
-# %%
+
+# ============================================================
+# 1. LOAD DATASET
+# ============================================================
+
 def load_jsonl(path):
+    rows = []
+
     with open(path, encoding="utf-8") as fh:
-        return [json.loads(line) for line in fh if line.strip()]
+        for line in fh:
+            if line.strip():
+                rows.append(json.loads(line))
+
+    return rows
 
 
-train_raw = load_jsonl(ROOT / "data" / "train_seed.jsonl")
-print(f"{len(train_raw)} mẫu huấn luyện")
-print(json.dumps(train_raw[0], ensure_ascii=False, indent=2)[:400])
+train_path = ROOT / "data" / "train_seed.jsonl"
 
-# %% [markdown]
-# ## 2. Tokenizer + kiểm tra template
-#
-# Chỉ tải **file tokenizer** (vài MB), không tải trọng số. Chạy được trên máy không GPU.
+assert train_path.exists(), f"Không tìm thấy dataset: {train_path}"
 
-# %%
+train_raw = load_jsonl(train_path)
+
+print("\n" + "=" * 70)
+print("1. DATASET")
+print("=" * 70)
+
+print(f"Số mẫu training: {len(train_raw)}")
+
+assert len(train_raw) > 0, "Dataset rỗng"
+
+print("\nVí dụ mẫu đầu tiên:")
+print(
+    json.dumps(
+        train_raw[0],
+        ensure_ascii=False,
+        indent=2
+    )[:1000]
+)
+
+
+# ============================================================
+# 2. LOAD TOKENIZER
+# ============================================================
+
+print("\n" + "=" * 70)
+print("2. TOKENIZER")
+print("=" * 70)
+
 from transformers import AutoTokenizer
 
-tok = AutoTokenizer.from_pretrained(TIER.model_id, trust_remote_code=True)
-print("eos_token:", tok.eos_token)
+tok = AutoTokenizer.from_pretrained(
+    TIER.model_id,
+    trust_remote_code=True
+)
 
-# %% [markdown]
-# ### Kiểm tra bắt buộc #1 — template có giữ khối suy luận không?
-#
-# Deck §22: **một số chat template xoá nội dung `<think>` ngay trong
-# `apply_chat_template`.** Khi đó reasoning traces trong dataset của bạn *không bao giờ*
-# tới được hàm loss — và không có gì báo lỗi cả. Kiểm tra một lần cho mỗi base model.
+print("Tokenizer loaded")
+print("EOS token     :", tok.eos_token)
+print("EOS token id  :", tok.eos_token_id)
+print("PAD token     :", tok.pad_token)
+print("PAD token id  :", tok.pad_token_id)
 
-# %%
+
+# ============================================================
+# 3. CHECK CHAT TEMPLATE / THINKING
+# ============================================================
+
+print("\n" + "=" * 70)
+print("3. CHAT TEMPLATE CHECK")
+print("=" * 70)
+
 check = data.thinking_survives(tok)
+
 print("VERDICT:", check["verdict"])
-print("\n--- chuỗi đã render ---")
+
+print("\n--- Rendered string ---")
 print(check["rendered"])
-report.write_json(check, "template_check.json", results_dir=ROOT / "results")
 
-# %% [markdown]
-# ## 3. Xây mask — và ĐỌC nó
-#
-# Bốn chế độ, và bạn phải hiểu khác biệt trước khi train:
-#
-# | mode | Loss tính trên | Dùng khi |
-# |---|---|---|
-# | `assistant-only` | toàn bộ lượt assistant | mặc định SFT |
-# | `masked-think` | lượt assistant **trừ** khối suy luận | base có chế độ thinking (§17.5) |
-# | `response-only` | chỉ phần sau `</think>` | nghiêm ngặt nhất |
-# | `everything` | **cả prompt** | ✗ đây là bug kinh điển — để bạn nhìn thấy nó |
+report.write_json(
+    check,
+    "template_check.json",
+    results_dir=ROOT / "results"
+)
 
-# %%
+print(
+    "\nSaved:",
+    ROOT / "results" / "template_check.json"
+)
+
+
+# ============================================================
+# 4. BUILD SAMPLE MESSAGE
+# ============================================================
+
 sample = data.to_messages(train_raw[0])
 
-for mode in ("assistant-only", "everything"):
-    ex = data.build_example(tok, sample, max_length=TIER.max_length, mask_mode=mode)
-    print("=" * 70)
-    print(f"mode = {mode}   supervised {ex.n_supervised}/{ex.n_total} "
-          f"({ex.supervised_fraction:.0%})")
-    print("--- LOSS TÍNH TRÊN ĐOẠN NÀY ---")
-    print(data.decode_supervised(tok, ex)[:400])
+print("\n" + "=" * 70)
+print("4. SAMPLE MESSAGES")
+print("=" * 70)
 
-# %% [markdown]
-# **Dừng lại và đọc kỹ output ở trên.**
-#
-# Với `everything`, câu hỏi của bạn nằm trong phần được tính loss → model sẽ học cách
-# *viết lại câu hỏi*. Đó chính xác là triệu chứng ở deck §22 (“Model viết tiếp câu hỏi
-# của bạn”). Rất nhiều người chỉ phát hiện ra sau khi train xong 3 tiếng.
+print(
+    json.dumps(
+        sample,
+        ensure_ascii=False,
+        indent=2
+    )
+)
 
-# %% [markdown]
-# ### Kiểm tra bắt buộc #2 — mask proof
-#
-# Đây là artefact nộp bài. Nó khẳng định: phần được tính loss **chứa** câu trả lời và
-# **không chứa** câu hỏi.
 
-# %%
-ex = data.build_example(tok, sample, max_length=TIER.max_length, mask_mode="assistant-only")
-supervised = data.decode_supervised(tok, ex)
-masked = data.decode_masked(tok, ex)
+# ============================================================
+# 5. COMPARE MASK MODES
+# ============================================================
+
+print("\n" + "=" * 70)
+print("5. MASK COMPARISON")
+print("=" * 70)
+
+for mode in (
+    "assistant-only",
+    "everything",
+):
+
+    ex = data.build_example(
+        tok,
+        sample,
+        max_length=TIER.max_length,
+        mask_mode=mode
+    )
+
+    print("\n" + "-" * 70)
+
+    print(
+        f"mode={mode}"
+        f" | supervised={ex.n_supervised}/{ex.n_total}"
+        f" | fraction={ex.supervised_fraction:.2%}"
+    )
+
+    print("\n--- TOKENS ĐƯỢC TÍNH LOSS ---")
+
+    supervised_text = data.decode_supervised(
+        tok,
+        ex
+    )
+
+    print(supervised_text[:1000])
+
+
+# ============================================================
+# 6. MASK PROOF
+# ============================================================
+
+print("\n" + "=" * 70)
+print("6. MASK PROOF")
+print("=" * 70)
+
+MASK_MODE = "assistant-only"
+
+ex = data.build_example(
+    tok,
+    sample,
+    max_length=TIER.max_length,
+    mask_mode=MASK_MODE
+)
+
+supervised = data.decode_supervised(
+    tok,
+    ex
+)
+
+masked = data.decode_masked(
+    tok,
+    ex
+)
 
 answer = sample[-1]["content"][:40]
+
 question_fragment = train_raw[0]["input"][:40]
 
 proof = {
-    "mask_mode": "assistant-only",
+    "mask_mode": MASK_MODE,
+
     "n_supervised": ex.n_supervised,
+
     "n_total": ex.n_total,
-    "supervised_fraction": round(ex.supervised_fraction, 4),
-    "answer_is_supervised": answer in supervised,
-    "question_is_masked": question_fragment not in supervised,
-    "supervised_preview": supervised[:300],
-    "masked_preview": masked[:300],
+
+    "supervised_fraction": round(
+        ex.supervised_fraction,
+        4
+    ),
+
+    "answer_is_supervised":
+        answer in supervised,
+
+    "question_is_masked":
+        question_fragment not in supervised,
+
+    "supervised_preview":
+        supervised[:300],
+
+    "masked_preview":
+        masked[:300],
 }
-assert proof["answer_is_supervised"], "câu trả lời KHÔNG nằm trong loss — mask sai"
-assert proof["question_is_masked"], "câu hỏi ĐANG nằm trong loss — mask sai"
-print(json.dumps({k: v for k, v in proof.items() if not k.endswith("preview")},
-                 ensure_ascii=False, indent=2))
-report.write_json(proof, "mask_proof.json", results_dir=ROOT / "results")
 
-# %% [markdown]
-# ## 4. Độ dài token → `max_length`
-#
-# Deck §17: `max_length` là **số đo**, không phải con số đoán. Đặt theo p95 rồi làm tròn
-# lên luỹ thừa 2. Đặt quá lớn = trả tiền cho padding; quá nhỏ = cắt mất câu trả lời.
 
-# %%
-lengths = [
-    data.build_example(tok, data.to_messages(r), max_length=8192).n_total
-    for r in train_raw
-]
+# ------------------------------------------------------------
+# Assertions bắt buộc
+# ------------------------------------------------------------
+
+assert proof["answer_is_supervised"], (
+    "Câu trả lời KHÔNG nằm trong loss. "
+    "Mask đang sai."
+)
+
+assert proof["question_is_masked"], (
+    "Câu hỏi ĐANG nằm trong loss. "
+    "Mask đang sai."
+)
+
+assert 0 < proof["supervised_fraction"] < 0.95, (
+    "supervised_fraction bất thường"
+)
+
+
+print(
+    json.dumps(
+        {
+            k: v
+            for k, v in proof.items()
+            if not k.endswith("preview")
+        },
+        ensure_ascii=False,
+        indent=2
+    )
+)
+
+
+report.write_json(
+    proof,
+    "mask_proof.json",
+    results_dir=ROOT / "results"
+)
+
+print(
+    "\nSaved:",
+    ROOT / "results" / "mask_proof.json"
+)
+
+
+# ============================================================
+# 7. TOKEN LENGTH STATISTICS
+# ============================================================
+
+print("\n" + "=" * 70)
+print("7. TOKEN LENGTH STATS")
+print("=" * 70)
+
+lengths = []
+
+for row in train_raw:
+
+    messages = data.to_messages(row)
+
+    example = data.build_example(
+        tok,
+        messages,
+        max_length=8192
+    )
+
+    lengths.append(example.n_total)
+
+
 stats = data.token_stats(lengths)
-print(json.dumps(stats, ensure_ascii=False, indent=2))
-report.write_json(stats, "token_stats.json", results_dir=ROOT / "results")
+
+print(
+    json.dumps(
+        stats,
+        ensure_ascii=False,
+        indent=2
+    )
+)
+
+
+report.write_json(
+    stats,
+    "token_stats.json",
+    results_dir=ROOT / "results"
+)
+
+
+print(
+    "\nSaved:",
+    ROOT / "results" / "token_stats.json"
+)
+
 
 if stats["suggested_max_length"] != TIER.max_length:
-    print(f"\n⚠ p95 gợi ý max_length={stats['suggested_max_length']} "
-          f"nhưng tier đang đặt {TIER.max_length}. Ghi lại lựa chọn của bạn trong REPORT.md.")
 
-# %% [markdown]
-# ## 5. Split cố định
-#
-# `seed=42` ở mọi notebook. Hai lần chạy khác seed thì **không so sánh được với nhau** —
-# và cả lab này là về việc so sánh.
+    print(
+        "\nWARNING:"
+        f" p95 đề xuất max_length="
+        f"{stats['suggested_max_length']}"
+        f" nhưng tier hiện tại="
+        f"{TIER.max_length}"
+    )
 
-# %%
-train, val = data.split(train_raw, train_frac=0.9, seed=42)
+
+# ============================================================
+# 8. FIXED TRAIN / VALIDATION SPLIT
+# ============================================================
+
+print("\n" + "=" * 70)
+print("8. TRAIN / VALIDATION SPLIT")
+print("=" * 70)
+
+train_rows, val_rows = data.split(
+    train_raw,
+    train_frac=0.9,
+    seed=42
+)
+
+
 split_dir = ROOT / "data" / "split"
-split_dir.mkdir(exist_ok=True)
-for name, rows in (("train", train), ("val", val)):
-    with (split_dir / f"{name}.jsonl").open("w", encoding="utf-8") as fh:
-        for r in rows:
-            fh.write(json.dumps(r, ensure_ascii=False) + "\n")
-print(f"train={len(train)}  val={len(val)}  -> {split_dir}")
 
-# %% [markdown]
-# ## ✅ Checkpoint NB1
-#
-# - [ ] `results/template_check.json` — biết template có giữ `<think>` không
-# - [ ] `results/mask_proof.json` — hai assert đều xanh
-# - [ ] `results/token_stats.json` — có p95
-# - [ ] `data/split/{train,val}.jsonl` — seed 42
-#
-# → Sang **NB2**: đóng băng tập eval và đo ba baseline **trước khi** train.
+split_dir.mkdir(
+    parents=True,
+    exist_ok=True
+)
+
+
+for name, rows in (
+    ("train", train_rows),
+    ("val", val_rows),
+):
+
+    output_file = split_dir / f"{name}.jsonl"
+
+    with output_file.open(
+        "w",
+        encoding="utf-8"
+    ) as fh:
+
+        for row in rows:
+
+            fh.write(
+                json.dumps(
+                    row,
+                    ensure_ascii=False
+                )
+                + "\n"
+            )
+
+    print(
+        f"Saved {len(rows)} samples"
+        f" -> {output_file}"
+    )
+
+
+# ============================================================
+# 9. FINAL CHECK
+# ============================================================
+
+print("\n" + "=" * 70)
+print("NB1 FINAL CHECK")
+print("=" * 70)
+
+required_files = [
+
+    ROOT / "results" / "template_check.json",
+
+    ROOT / "results" / "mask_proof.json",
+
+    ROOT / "results" / "token_stats.json",
+
+    ROOT / "data" / "split" / "train.jsonl",
+
+    ROOT / "data" / "split" / "val.jsonl",
+]
+
+
+all_ok = True
+
+for file in required_files:
+
+    exists = file.exists()
+
+    print(
+        "[OK]" if exists else "[MISSING]",
+        file
+    )
+
+    all_ok &= exists
+
+
+if all_ok:
+
+    print("\n✅ NB1 HOÀN THÀNH")
+
+else:
+
+    raise RuntimeError(
+        "NB1 chưa sinh đủ artefact"
+    )

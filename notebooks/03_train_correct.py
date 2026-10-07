@@ -1,182 +1,808 @@
-# %% [markdown]
-# # NB3 — Huấn luyện cấu hình ĐÚNG
-#
-# Cấu hình ở đây là "vùng không hối tiếc" của deck §11, viết thẳng thành code:
-#
-# | Nút | Giá trị | Deck |
-# |---|---|---|
-# | `target_modules` | **toàn bộ linear của text decoder** | §11.2 |
-# | `learning_rate` | **≈10× LR full-FT** | §11.3 |
-# | batch hiệu dụng | **< 32** | §11.4 |
-# | `packing` | **tắt** — xem ghi chú | §17.3 |
-# | `padding_free` | chỉ khi có flash-attn **và** batch ≥ 2 | §17.3 |
-#
-# > **Vì sao khác deck §14.** Deck khuyến nghị bật `packing` + `padding_free`. Trên
-# > model mặc định của lab, cả hai đều **không dùng được**, và lab nói thẳng thay vì
-# > bật cờ vô tác dụng:
-# >
-# > * `packing` **tắt** vì ta nạp nhãn đã token hoá sẵn (mask đã kiểm chứng ở NB1).
-# >   Packing nối các mẫu lại và sẽ phá vỡ căn chỉnh nhãn. *Tính đúng của mask quan
-# >   trọng hơn thông lượng.*
-# > * `padding_free` cần kernel **FlashAttention**, mà FA-2 đòi **Ampere (sm_80+)** —
-# >   T4 là Turing, không bao giờ có. Và với `batch=1` thì cũng chẳng có padding nào
-# >   để bỏ. Xem `labkit/device.py`.
-# >
-# > Tinh thần §17.3 vẫn đúng: *tăng tốc chỉ miễn phí khi ranh giới chuỗi được tôn
-# > trọng.* Ở đây điều kiện đó không thoả, nên ta không bật.
-# | `loss_type` | `chunked_nll` | §14 |
-# | `alpha` | `2r` | §10.3 |
+# ============================================================
+# NB3 — TRAIN CORRECT CONFIGURATION
+# ============================================================
 
-# %%
-import json, os, pathlib, sys, time
-sys.path.insert(0, str(pathlib.Path.cwd() / "src"))
-sys.path.insert(0, str(pathlib.Path.cwd().parent / "src"))
+import json
+import os
+import pathlib
+import sys
+import time
 
-from labkit import data, device, generate, modeling, report, train
-from labkit.config import SPECS, get_tier, training_epochs
 
-ROOT = pathlib.Path.cwd() if (pathlib.Path.cwd() / "data").exists() else pathlib.Path.cwd().parent
-TIER = get_tier(os.environ.get("COMPUTE_TIER", "T4"))
+# ------------------------------------------------------------
+# 0. PATH SETUP
+# ------------------------------------------------------------
+
+sys.path.insert(
+    0,
+    str(pathlib.Path.cwd() / "src")
+)
+
+sys.path.insert(
+    0,
+    str(pathlib.Path.cwd().parent / "src")
+)
+
+
+from labkit import data
+from labkit import device
+from labkit import generate
+from labkit import modeling
+from labkit import report
+from labkit import train
+
+from labkit.config import (
+    SPECS,
+    get_tier,
+    training_epochs
+)
+
+
+ROOT = (
+    pathlib.Path.cwd()
+    if (pathlib.Path.cwd() / "data").exists()
+    else pathlib.Path.cwd().parent
+)
+
+
+os.environ.setdefault(
+    "COMPUTE_TIER",
+    "T4"
+)
+
+
+TIER = get_tier(
+    os.environ.get(
+        "COMPUTE_TIER",
+        "T4"
+    )
+)
+
+
 SPEC = SPECS["correct"]
-print(f"{TIER.name} · {TIER.model_id} · {SPEC.label}")
-print(device.banner())      # which precision is ACTUALLY being used, and why
 
-# %% [markdown]
-# ## 1. Nạp model — và nhìn vào kiến trúc bạn đang fine-tune
-#
-# Deck §7.4 nói các base 2026 xen kẽ **linear attention** với **full attention**. Đây là
-# chỗ điều đó thôi là slide: config của chính model sẽ nói cho bạn biết.
 
-# %%
-model, tok = generate.load_base(TIER, load_in_4bit=SPEC.load_in_4bit)
-print(json.dumps(modeling.layer_type_summary(model.config), ensure_ascii=False, indent=2))
+print("=" * 70)
+print("NB3 — CORRECT TRAINING")
+print("=" * 70)
 
-# %% [markdown]
-# ## 2. `all-linear` — nhưng không phải *mọi* linear
-#
-# Qwen3.5 là model **đa phương thức**: text decoder + vision tower. `target_modules=
-# "all-linear"` của PEFT sẽ gắn adapter vào **cả vision encoder** bạn không hề huấn
-# luyện — adapter phình to, step chậm hơn, và merge ra một checkpoint sai.
-#
-# `resolve_target_modules` trả về đúng phần text decoder.
+print(
+    f"Tier  : {TIER.name}"
+)
 
-# %%
-targets = modeling.resolve_target_modules(model, SPEC.target)
-trainable = modeling.count_lora_params(model, targets, SPEC.r)
-print(f"placement={SPEC.target}  modules={targets}")
-print(f"trainable LoRA params ≈ {trainable/1e6:.2f} M")
+print(
+    f"Model : {TIER.model_id}"
+)
 
-for row in modeling.describe_placement(model, SPEC.r):
-    print("   ", row)
+print(
+    f"Spec  : {SPEC.label}"
+)
 
-# %% [markdown]
-# ## 3. Dataset đã tokenize + mask (dùng lại NB1)
+print()
 
-# %%
+print(
+    device.banner()
+)
+
+
+# ============================================================
+# 1. LOAD BASE MODEL
+# ============================================================
+
+print("\n" + "=" * 70)
+print("1. LOAD BASE MODEL")
+print("=" * 70)
+
+
+model, tok = generate.load_base(
+
+    TIER,
+
+    load_in_4bit=SPEC.load_in_4bit
+)
+
+
+# ============================================================
+# 2. MODEL ARCHITECTURE
+# ============================================================
+
+print("\n" + "=" * 70)
+print("2. MODEL ARCHITECTURE")
+print("=" * 70)
+
+
+layer_summary = (
+    modeling.layer_type_summary(
+        model.config
+    )
+)
+
+
+print(
+    json.dumps(
+        layer_summary,
+        ensure_ascii=False,
+        indent=2
+    )
+)
+
+
+# ============================================================
+# 3. RESOLVE LORA TARGET MODULES
+# ============================================================
+
+print("\n" + "=" * 70)
+print("3. LoRA TARGET MODULES")
+print("=" * 70)
+
+
+targets = (
+    modeling.resolve_target_modules(
+        model,
+        SPEC.target
+    )
+)
+
+
+trainable_params = (
+    modeling.count_lora_params(
+        model,
+        targets,
+        SPEC.r
+    )
+)
+
+
+print(
+    "Placement:",
+    SPEC.target
+)
+
+
+print(
+    "Target modules:"
+)
+
+for module in targets:
+
+    print(
+        "  -",
+        module
+    )
+
+
+print(
+    f"\nTrainable LoRA params ≈ "
+    f"{trainable_params / 1e6:.2f} M"
+)
+
+
+print(
+    "\nPlacement detail:"
+)
+
+
+for row in modeling.describe_placement(
+    model,
+    SPEC.r
+):
+
+    print(
+        "   ",
+        row
+    )
+
+
+# ============================================================
+# 4. LOAD TRAIN SPLIT
+# ============================================================
+
+print("\n" + "=" * 70)
+print("4. LOAD TRAIN SPLIT")
+print("=" * 70)
+
+
 from datasets import Dataset
 
-split_dir = ROOT / "data" / "split"
-assert split_dir.exists(), "Chạy NB1 trước — chưa có data/split/"
 
-def load_jsonl(p):
-    return [json.loads(l) for l in open(p, encoding="utf-8") if l.strip()]
+split_dir = (
+    ROOT /
+    "data" /
+    "split"
+)
 
-train_rows = load_jsonl(split_dir / "train.jsonl")
-MASK_MODE = os.environ.get("MASK_MODE", "assistant-only")
 
-# Train on the mask you PROVED in NB1 — not on a library flag.
-#
-# TRL's `assistant_only_loss` builds its mask from `{% generation %}` markers in the
-# chat template. Qwen3.5 has none. TRL >= 1.10 then either RAISES (this lab's unsloth
-# template) or swaps in its own patched template (official Qwen3.5) whose mask also
-# covers the empty <think> block — neither is the mask NB1 proved. And a pipeline that
-# reads the tokenizer's mask directly gets ZERO tokens with only a warning.
-# Check it yourself:  python scripts/check_mask_agreement.py
-rows = data.to_training_dataset(tok, train_rows, max_length=TIER.max_length,
-                                mask_mode=MASK_MODE)
-train_ds = Dataset.from_list(rows)
-sup = sum(sum(1 for x in r["labels"] if x != data.IGNORE_INDEX) for r in rows)
-tot = sum(len(r["labels"]) for r in rows)
-print(train_ds)
-print(f"mask_mode = {MASK_MODE}   supervised {sup}/{tot} tokens ({sup/tot:.1%})")
-assert 0 < sup < tot, "mask covers nothing or everything — stop and re-run NB1"
+assert split_dir.exists(), (
+    "Không có data/split/. "
+    "Bạn phải chạy NB1 trước."
+)
 
-# %% [markdown]
-# ## 4. Cấu hình — lọc theo phiên bản TRL đang cài
-#
-# `filter_kwargs` hỏi TRL xem nó nhận tham số nào và **bỏ những gì không nhận, có cảnh
-# báo**. Lab cũ phải monkey-patch `tokenizer=` → `processing_class=` và
-# `evaluation_strategy` → `eval_strategy`; những bản vá đó là hoá thạch của TRL trước
-# 1.0. Cách này không tạo ra hoá thạch mới.
 
-# %%
+train_file = (
+    split_dir /
+    "train.jsonl"
+)
+
+
+assert train_file.exists(), (
+    "Không có train.jsonl. "
+    "Chạy NB1 trước."
+)
+
+
+def load_jsonl(path):
+
+    rows = []
+
+    with open(
+        path,
+        encoding="utf-8"
+    ) as fh:
+
+        for line in fh:
+
+            if line.strip():
+
+                rows.append(
+                    json.loads(line)
+                )
+
+    return rows
+
+
+train_rows = load_jsonl(
+    train_file
+)
+
+
+print(
+    f"Train samples: {len(train_rows)}"
+)
+
+
+# ============================================================
+# 5. BUILD TOKENIZED TRAIN DATASET
+# ============================================================
+
+MASK_MODE = os.environ.get(
+    "MASK_MODE",
+    "assistant-only"
+)
+
+
+print(
+    "Mask mode:",
+    MASK_MODE
+)
+
+
+rows = data.to_training_dataset(
+
+    tok,
+
+    train_rows,
+
+    max_length=TIER.max_length,
+
+    mask_mode=MASK_MODE
+)
+
+
+train_ds = Dataset.from_list(
+    rows
+)
+
+
+# ------------------------------------------------------------
+# Count supervised tokens
+# ------------------------------------------------------------
+
+supervised_tokens = sum(
+
+    sum(
+        1
+        for token in row["labels"]
+        if token != data.IGNORE_INDEX
+    )
+
+    for row in rows
+)
+
+
+total_tokens = sum(
+
+    len(row["labels"])
+
+    for row in rows
+)
+
+
+supervised_fraction = (
+    supervised_tokens /
+    total_tokens
+)
+
+
+print(
+    train_ds
+)
+
+
+print(
+    f"Supervised tokens:"
+    f" {supervised_tokens}"
+    f"/{total_tokens}"
+    f" ({supervised_fraction:.2%})"
+)
+
+
+assert (
+    0
+    <
+    supervised_tokens
+    <
+    total_tokens
+), (
+    "Mask đang cover toàn bộ hoặc không cover token nào."
+)
+
+
+assert supervised_fraction < 0.95, (
+    "Mask có vẻ đang tính loss cả prompt."
+)
+
+
+# ============================================================
+# 6. TRAINING CONFIG
+# ============================================================
+
+print("\n" + "=" * 70)
+print("6. TRAINING CONFIG")
+print("=" * 70)
+
+
 from peft import LoraConfig
-from trl import SFTConfig, SFTTrainer
+from trl import SFTConfig
+from trl import SFTTrainer
 
-EPOCHS = training_epochs()          # $EPOCHS, default 2 -- NB4 reads the SAME function
-STEPS = train.planned_steps(len(rows), TIER, EPOCHS)
-print(f"epochs={EPOCHS}  ->  {STEPS} optimizer steps  (NB4 runs its contrasts at exactly this many)")
+
+# ------------------------------------------------------------
+# Epochs
+# NB4 phải dùng cùng số epoch / step này
+# ------------------------------------------------------------
+
+EPOCHS = training_epochs()
+
+
+STEPS = train.planned_steps(
+
+    len(rows),
+
+    TIER,
+
+    EPOCHS
+)
+
+
+print(
+    f"EPOCHS = {EPOCHS}"
+)
+
+print(
+    f"Optimizer steps = {STEPS}"
+)
+
+
+# ============================================================
+# 7. SFT CONFIG
+# ============================================================
+
+output_dir = (
+    ROOT /
+    "adapters" /
+    SPEC.key
+)
+
 
 want_sft = train.sft_config_kwargs(
-    TIER, SPEC, output_dir=str(ROOT / "adapters" / SPEC.key),
-    num_train_epochs=EPOCHS, mask_mode=MASK_MODE,
+
+    TIER,
+
+    SPEC,
+
+    output_dir=str(
+        output_dir
+    ),
+
+    num_train_epochs=EPOCHS,
+
+    mask_mode=MASK_MODE,
+
     total_steps=STEPS,
 )
-sft_kwargs, dropped = train.filter_kwargs(SFTConfig, want_sft, label="SFTConfig")
-if dropped:
-    print("⚠ TRL không nhận:", dropped)
 
-want_lora = train.lora_config_kwargs(SPEC, targets)
-lora_kwargs, _ = train.filter_kwargs(LoraConfig, want_lora, label="LoraConfig")
 
-print(json.dumps({k: str(v) for k, v in sft_kwargs.items()}, indent=2)[:900])
+sft_kwargs, dropped = (
+    train.filter_kwargs(
 
-# %% [markdown]
-# ## 5. Train
+        SFTConfig,
 
-# %%
-generate.free_memory()
-trainer = SFTTrainer(
-    model=model,
-    args=SFTConfig(**sft_kwargs),
-    train_dataset=train_ds,
-    processing_class=tok,          # NOT tokenizer= — removed in TRL v1
-    peft_config=LoraConfig(**lora_kwargs),
+        want_sft,
+
+        label="SFTConfig"
+    )
 )
 
-# TRL casts LoRA weights to bf16 regardless of the device or the fp16 flag it was
-# handed. fp16's GradScaler cannot unscale bf16 gradients -- see F-23 and
-# scripts/probe_precision.py. No-op on bf16/fp32 hardware.
-fix = train.align_trainable_precision(trainer.model)
-print("precision fix:", fix)
 
-t0 = time.perf_counter()
+if dropped:
+
+    print(
+        "\n⚠ TRL không nhận các tham số:"
+    )
+
+    for key in dropped:
+
+        print(
+            "  -",
+            key
+        )
+
+
+# ============================================================
+# 8. LORA CONFIG
+# ============================================================
+
+want_lora = (
+    train.lora_config_kwargs(
+        SPEC,
+        targets
+    )
+)
+
+
+lora_kwargs, dropped_lora = (
+    train.filter_kwargs(
+
+        LoraConfig,
+
+        want_lora,
+
+        label="LoraConfig"
+    )
+)
+
+
+if dropped_lora:
+
+    print(
+        "\n⚠ PEFT không nhận:"
+    )
+
+    for key in dropped_lora:
+
+        print(
+            "  -",
+            key
+        )
+
+
+print(
+    "\nSFT Config:"
+)
+
+
+print(
+    json.dumps(
+        {
+            key: str(value)
+            for key, value
+            in sft_kwargs.items()
+        },
+        indent=2
+    )
+)
+
+
+print(
+    "\nLoRA Config:"
+)
+
+
+print(
+    json.dumps(
+        {
+            key: str(value)
+            for key, value
+            in lora_kwargs.items()
+        },
+        indent=2
+    )
+)
+
+
+# ============================================================
+# 9. FREE UNUSED MEMORY
+# ============================================================
+
+print("\n" + "=" * 70)
+print("9. PREPARE TRAINER")
+print("=" * 70)
+
+
+generate.free_memory()
+
+
+# ============================================================
+# 10. CREATE TRAINER
+# ============================================================
+
+trainer = SFTTrainer(
+
+    model=model,
+
+    args=SFTConfig(
+        **sft_kwargs
+    ),
+
+    train_dataset=train_ds,
+
+    processing_class=tok,
+
+    peft_config=LoraConfig(
+        **lora_kwargs
+    ),
+)
+
+
+# ============================================================
+# 11. PRECISION FIX
+# ============================================================
+
+fix = (
+    train.align_trainable_precision(
+        trainer.model
+    )
+)
+
+
+print(
+    "Precision fix:",
+    fix
+)
+
+
+# ============================================================
+# 12. TRAIN
+# ============================================================
+
+print("\n" + "=" * 70)
+print("12. TRAINING START")
+print("=" * 70)
+
+
+start_time = (
+    time.perf_counter()
+)
+
+
 result = trainer.train()
-elapsed = time.perf_counter() - t0
-print(f"train {elapsed:.0f}s  final loss {result.training_loss:.4f}")
 
-# %% [markdown]
-# ## 6. LƯU ADAPTER NGAY
-#
-# Trước khi eval. Eval có thể OOM; adapter thì đã an toàn trên đĩa.
 
-# %%
-out = ROOT / "adapters" / SPEC.key
-trainer.model.save_pretrained(out)
-tok.save_pretrained(out)
-print("saved ->", out)
+elapsed = (
+    time.perf_counter()
+    -
+    start_time
+)
 
-row = train.summarize_run(SPEC, TIER, targets, trainable, elapsed, generate.peak_vram_gb())
-row["final_loss"] = round(result.training_loss, 4)
-row["mask_mode"] = MASK_MODE
-# Record the step budget so NB5/verify can CHECK that the four runs are comparable,
-# instead of trusting that they were configured the same way.
-row["max_steps"] = STEPS
-report.append_row(row, results_dir=ROOT / "results")
-print(json.dumps(row, ensure_ascii=False, indent=2))
 
-# %% [markdown]
-# ## ✅ Checkpoint NB3
-# - [ ] `adapters/correct/` tồn tại
-# - [ ] `results/runs.csv` có một dòng `correct`
-# - [ ] Bạn đã ghi lại loss cuối và peak VRAM
+final_loss = (
+    result.training_loss
+)
+
+
+print("\n" + "=" * 70)
+print("TRAINING FINISHED")
+print("=" * 70)
+
+
+print(
+    f"Elapsed time:"
+    f" {elapsed:.2f} sec"
+)
+
+
+print(
+    f"Final loss:"
+    f" {final_loss:.6f}"
+)
+
+
+# ============================================================
+# 13. SAVE ADAPTER IMMEDIATELY
+# ============================================================
+
+print("\n" + "=" * 70)
+print("13. SAVE ADAPTER")
+print("=" * 70)
+
+
+output_dir.mkdir(
+    parents=True,
+    exist_ok=True
+)
+
+
+trainer.model.save_pretrained(
+    output_dir
+)
+
+
+tok.save_pretrained(
+    output_dir
+)
+
+
+print(
+    "Adapter saved ->",
+    output_dir
+)
+
+
+# ============================================================
+# 14. SAVE RUN METRICS
+# ============================================================
+
+peak_vram = (
+    generate.peak_vram_gb()
+)
+
+
+row = train.summarize_run(
+
+    SPEC,
+
+    TIER,
+
+    targets,
+
+    trainable_params,
+
+    elapsed,
+
+    peak_vram
+)
+
+
+row["final_loss"] = round(
+    final_loss,
+    4
+)
+
+
+row["mask_mode"] = (
+    MASK_MODE
+)
+
+
+row["max_steps"] = (
+    STEPS
+)
+
+
+report.append_row(
+
+    row,
+
+    results_dir=ROOT / "results"
+)
+
+
+print("\nRun summary:")
+
+
+print(
+    json.dumps(
+        row,
+        ensure_ascii=False,
+        indent=2
+    )
+)
+
+
+# ============================================================
+# 15. VERIFY SAVED FILES
+# ============================================================
+
+print("\n" + "=" * 70)
+print("15. NB3 FINAL CHECK")
+print("=" * 70)
+
+
+adapter_config = (
+    output_dir /
+    "adapter_config.json"
+)
+
+
+possible_weight_files = [
+
+    output_dir /
+    "adapter_model.safetensors",
+
+    output_dir /
+    "adapter_model.bin",
+]
+
+
+runs_csv = (
+    ROOT /
+    "results" /
+    "runs.csv"
+)
+
+
+print(
+    "[OK]"
+    if adapter_config.exists()
+    else "[MISSING]",
+    adapter_config
+)
+
+
+weight_exists = any(
+    path.exists()
+    for path
+    in possible_weight_files
+)
+
+
+print(
+    "[OK]"
+    if weight_exists
+    else "[MISSING]",
+    "adapter weights"
+)
+
+
+print(
+    "[OK]"
+    if runs_csv.exists()
+    else "[MISSING]",
+    runs_csv
+)
+
+
+assert adapter_config.exists(), (
+    "Thiếu adapter_config.json"
+)
+
+
+assert weight_exists, (
+    "Thiếu adapter_model weights"
+)
+
+
+assert runs_csv.exists(), (
+    "Thiếu results/runs.csv"
+)
+
+
+print(
+    "\n✅ NB3 HOÀN THÀNH"
+)
+
+print(
+    f"Final loss : {final_loss:.4f}"
+)
+
+print(
+    f"Peak VRAM  : {peak_vram:.2f} GB"
+)
+
+print(
+    f"Steps      : {STEPS}"
+)
+
+print(
+    f"Epochs     : {EPOCHS}"
+)
