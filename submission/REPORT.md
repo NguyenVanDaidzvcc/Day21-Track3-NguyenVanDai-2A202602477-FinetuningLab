@@ -175,6 +175,28 @@ cherry-picking.
 
 ---
 
+Trên toàn bộ 50 mẫu target, tôi không tìm thấy trường hợp nào fine-tune có
+`ft_score < baseline_score`. Vì vậy tôi không tạo giả các ca “FT thua”.
+Thay vào đó, tôi trình bày hai ca fine-tune thắng rõ ràng và ba ca hòa,
+trong đó có các khác biệt ở từng trường dữ liệu để phân tích lỗi chi tiết.
+
+| # | Ticket (rút gọn) | Nhãn đúng | (b) prompt | (c) fine-tune | Nhận xét |
+|---|---|---|---|---|---|
+| 1 | Đổi size balo laptop, lần cuối mua ở đây | `doi_tra`, `thap`, `balo laptop`, `tieu_cuc` | `hoan_tien`, `cao`, `balo laptop`, `tieu_cuc` | `doi_tra`, `thap`, `balo laptop`, `tieu_cuc` | ✅ FT thắng: sửa đúng cả intent và urgency |
+| 2 | Muốn đổi máy xay sinh tố sau 3 ngày | `doi_tra`, `trung_binh`, `máy xay sinh tố`, `tieu_cuc` | `van_chuyen`, `cao`, `máy xay sinh tố`, `tieu_cuc` | `doi_tra`, `trung_binh`, `máy xay sinh tố`, `tieu_cuc` | ✅ FT thắng: sửa đúng intent và urgency |
+| 3 | Bình giữ nhiệt, chưa thấy tiền hoàn | `hoan_tien`, `thap`, `bình giữ nhiệt`, `tich_cuc` | `hoan_tien`, `trung_binh`, `bình giữ nhiệt`, `tich_cuc` | `hoan_tien`, `trung_binh`, `bình giữ nhiệt`, `tich_cuc` | ➖ Hòa 0.75: cả hai cùng sai urgency |
+| 4 | Áo khoác gió bị lỗi, hỏi khi nào hoàn tiền | `san_pham_loi`, `thap`, `áo khoác gió`, `tich_cuc` | `san_pham_loi`, `trung_binh`, `áo khoác gió`, `tich_cuc` | `san_pham_loi`, `trung_binh`, `áo khoác gió`, `tich_cuc` | ➖ Hòa 0.75: lỗi tập trung ở urgency |
+| 5 | Nồi chiên không dầu, hoàn tiền chậm | `hoan_tien`, `thap`, `nồi chiên không dầu`, `tieu_cuc` | `hoan_tien`, `cao`, `nồi chiên không dầu`, `tieu_cuc` | `hoan_tien`, `trung_binh`, `nồi chiên không dầu`, `tieu_cuc` | ➖ Hòa 0.75: FT cải thiện urgency từ `cao` xuống `trung_binh` nhưng vẫn chưa đạt `thap` |
+
+Hai ca đầu cho thấy fine-tune cải thiện rõ rệt khả năng nhận diện intent và urgency.
+Ba ca còn lại cho thấy lỗi phổ biến nhất của fine-tune nằm ở trường `urgency`,
+đặc biệt là xu hướng dự đoán `trung_binh` thay vì `thap`.
+
+Điểm đáng chú ý là trên tập target này không xuất hiện trường hợp fine-tune thua
+baseline theo metric tổng. Tuy nhiên verdict chung vẫn là `FAILED` vì regression
+giảm mạnh từ `0.7911` xuống `0.4778`. Điều này cho thấy một mô hình có thể không
+thua trên task chuyên biệt nhưng vẫn không đủ an toàn để thay thế model gốc do
+suy giảm năng lực tổng quát.
 ## 7. Kết luận & điều tôi học được
 
 **Tôi chưa nên deploy bản fine-tune hiện tại như một model thay thế tổng quát.**
